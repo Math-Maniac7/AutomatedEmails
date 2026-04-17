@@ -1,0 +1,12 @@
+email-manager/frontend/node_modules/
+email-manager/frontend/dist/
+email-manager/frontend/tsconfig.tsbuildinfo
+email-manager/frontend/.env
+
+email-manager/backend/.venv/
+email-manager/backend/__pycache__/
+email-manager/backend/.env
+
+*.pyc
+*.pyo
+*.DS_Store
