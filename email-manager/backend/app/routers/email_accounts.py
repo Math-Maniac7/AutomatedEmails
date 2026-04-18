@@ -102,6 +102,45 @@ async def test_account_connection(
     db: AsyncSession = Depends(get_db),
 ):
     account = await _get_account(account_id, current_user.id, db)
+
+    if account.account_type == "gmail_oauth":
+        # For Gmail OAuth accounts, verify the token via a lightweight API call
+        try:
+            from app.services.gmail_service import get_valid_access_token
+            import httpx
+            token = await get_valid_access_token(account)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if resp.status_code == 200:
+                return {"status": "ok", "email": resp.json().get("emailAddress")}
+            raise HTTPException(status_code=400, detail="Gmail OAuth token is invalid or expired — reconnect via OAuth")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Gmail connection test failed: {exc}")
+
+    if account.account_type == "outlook_oauth":
+        try:
+            from app.services.encryption_service import encryption_service
+            import httpx
+            token = encryption_service.decrypt(account.oauth_access_token)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://graph.microsoft.com/v1.0/me/mailboxSettings",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if resp.status_code == 200:
+                return {"status": "ok"}
+            raise HTTPException(status_code=400, detail="Outlook OAuth token is invalid or expired — reconnect via OAuth")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Outlook connection test failed: {exc}")
+
+    # IMAP/SMTP account
     ok = await test_imap_connection(account)
     if not ok:
         raise HTTPException(status_code=400, detail="Connection failed — check credentials and server settings")
@@ -115,15 +154,11 @@ async def sync_account(
     db: AsyncSession = Depends(get_db),
 ):
     account = await _get_account(account_id, current_user.id, db)
-    # Prefer the background worker, but keep manual sync usable for local MVP runs.
-    from app.workers.email_polling import _poll_account_by_id, poll_single_account
-
-    try:
-        poll_single_account.delay(str(account.id))
-        return {"status": "sync queued"}
-    except Exception:
-        await _poll_account_by_id(account.id)
-        return {"status": "synced"}
+    # Always run directly so the HTTP response only returns once emails are stored.
+    # Celery Beat handles automatic background polling every 60 s independently.
+    from app.workers.email_polling import _poll_account_by_id
+    await _poll_account_by_id(account.id)
+    return {"status": "synced"}
 
 
 async def _get_account(account_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession) -> EmailAccount:

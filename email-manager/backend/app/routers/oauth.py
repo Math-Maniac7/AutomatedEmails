@@ -5,13 +5,15 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
+from jose import JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.dependencies import get_current_user
+from app.core.security import decode_access_token
 from app.database import get_db
 from app.models.email_account import EmailAccount
 from app.models.user import User
@@ -33,6 +35,19 @@ OUTLOOK_USERINFO_URL = "https://graph.microsoft.com/v1.0/me"
 OUTLOOK_SCOPE = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.Send offline_access email profile"
 
 
+async def _get_user_from_token_param(token: str, db: AsyncSession) -> User:
+    """Authenticate via JWT passed as a query param (used for browser-redirect OAuth flows)."""
+    try:
+        user_id = decode_access_token(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
 def _require_oauth_config(provider: str, client_id: str, client_secret: str) -> None:
     if client_id and client_secret:
         return
@@ -45,8 +60,9 @@ def _require_oauth_config(provider: str, client_id: str, client_secret: str) -> 
 # ── Gmail ──────────────────────────────────────────────────────────────────────
 
 @router.get("/gmail/start")
-async def gmail_start(current_user: User = Depends(get_current_user)):
+async def gmail_start(token: str = Query(...), db: AsyncSession = Depends(get_db)):
     _require_oauth_config("Gmail", settings.gmail_client_id, settings.gmail_client_secret)
+    current_user = await _get_user_from_token_param(token, db)
     state = secrets.token_urlsafe(32)
     _state_store[state] = {"user_id": str(current_user.id), "expires": datetime.now(timezone.utc) + timedelta(minutes=10)}
 
@@ -89,14 +105,15 @@ async def gmail_callback(code: str, state: str, db: AsyncSession = Depends(get_d
     email_address = userinfo["email"]
     await _upsert_oauth_account(db, user_id, "gmail_oauth", email_address, tokens)
 
-    return RedirectResponse(f"{settings.frontend_origin}/settings/accounts?connected=gmail")
+    return RedirectResponse(f"{settings.frontend_origin}/settings?connected=gmail")
 
 
 # ── Outlook ────────────────────────────────────────────────────────────────────
 
 @router.get("/outlook/start")
-async def outlook_start(current_user: User = Depends(get_current_user)):
+async def outlook_start(token: str = Query(...), db: AsyncSession = Depends(get_db)):
     _require_oauth_config("Outlook", settings.outlook_client_id, settings.outlook_client_secret)
+    current_user = await _get_user_from_token_param(token, db)
     state = secrets.token_urlsafe(32)
     _state_store[state] = {"user_id": str(current_user.id), "expires": datetime.now(timezone.utc) + timedelta(minutes=10)}
 
@@ -138,7 +155,7 @@ async def outlook_callback(code: str, state: str, db: AsyncSession = Depends(get
     email_address = userinfo.get("mail") or userinfo.get("userPrincipalName", "")
     await _upsert_oauth_account(db, user_id, "outlook_oauth", email_address, tokens)
 
-    return RedirectResponse(f"{settings.frontend_origin}/settings/accounts?connected=outlook")
+    return RedirectResponse(f"{settings.frontend_origin}/settings?connected=outlook")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

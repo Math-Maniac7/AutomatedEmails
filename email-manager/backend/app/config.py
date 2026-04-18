@@ -1,9 +1,13 @@
 import base64
+import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Always find .env relative to this file regardless of working directory
+_ENV_FILE = os.path.join(os.path.dirname(__file__), "..", ".env")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
     # Database
     database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/email_manager"

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle,
@@ -19,6 +20,9 @@ import {
   syncAccount,
   testAccount,
 } from "@/api/accounts";
+import { useAuthStore } from "@/store/authStore";
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 type ProviderId = "gmail" | "outlook" | "yahoo" | "icloud" | "other";
 
@@ -143,12 +147,32 @@ function buildForm(providerId: ProviderId): MailboxForm {
 
 export default function SettingsPage() {
   const qc = useQueryClient();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const accessToken = useAuthStore((s) => s.accessToken);
   const [showConnectFlow, setShowConnectFlow] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>("gmail");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [testStatus, setTestStatus] = useState<Record<string, "ok" | "fail">>({});
   const [accountActionMessage, setAccountActionMessage] = useState<Record<string, string>>({});
   const [form, setForm] = useState<MailboxForm>(() => buildForm("gmail"));
+  const [oauthSuccess, setOauthSuccess] = useState<string | null>(null);
+
+  // Detect return from OAuth callback (?connected=gmail or ?connected=outlook)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const connected = params.get("connected");
+    if (connected) {
+      setOauthSuccess(connected);
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      navigate("/settings", { replace: true });
+    }
+  }, [location.search]);
+
+  function handleOAuthConnect(provider: "gmail" | "outlook") {
+    if (!accessToken) return;
+    window.location.href = `${API_BASE}/oauth/${provider}/start?token=${encodeURIComponent(accessToken)}`;
+  }
 
   useEffect(() => {
     setForm((prev) => ({
@@ -249,6 +273,18 @@ export default function SettingsPage() {
         </p>
       </div>
 
+      {oauthSuccess && (
+        <div className="flex items-center gap-3 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          <CheckCircle className="h-4 w-4 shrink-0" />
+          <span>
+            Your {oauthSuccess === "gmail" ? "Gmail" : "Outlook"} account was connected successfully via OAuth.
+          </span>
+          <button onClick={() => setOauthSuccess(null)} className="ml-auto text-green-600 hover:text-green-800">
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="rounded-2xl border border-border bg-card p-5">
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="space-y-1">
@@ -304,6 +340,34 @@ export default function SettingsPage() {
                 })}
               </div>
             </div>
+
+            {/* OAuth option for Gmail / Outlook */}
+            {(selectedProvider === "gmail" || selectedProvider === "outlook") && (
+              <div className="rounded-xl border border-primary/30 bg-primary/5 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-medium">
+                      Connect with {selectedProvider === "gmail" ? "Google" : "Microsoft"} — recommended
+                    </p>
+                    <p className="mt-0.5 text-sm text-muted-foreground">
+                      Secure OAuth login — no passwords stored.{" "}
+                      {selectedProvider === "gmail"
+                        ? "Requires Gmail API enabled in your Google Cloud project."
+                        : "Requires Mail permissions in your Azure app registration."}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleOAuthConnect(selectedProvider as "gmail" | "outlook")}
+                    className="shrink-0 rounded-md bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                  >
+                    {selectedProvider === "gmail" ? "Sign in with Google" : "Sign in with Microsoft"}
+                  </button>
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  — or enter credentials manually below —
+                </p>
+              </div>
+            )}
 
             <div className="grid gap-6 lg:grid-cols-[1.3fr_0.9fr]">
               <div className="space-y-4 rounded-xl border border-border bg-background/60 p-4">
@@ -445,7 +509,7 @@ export default function SettingsPage() {
                   </div>
                   <div className="flex items-start gap-2">
                     <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-                    <p>For Gmail, Yahoo, and iCloud, you will usually need an app password.</p>
+                    <p>Gmail and Outlook support secure OAuth — no password needed. For Yahoo and iCloud, use an app password.</p>
                   </div>
                   <div className="flex items-start gap-2">
                     <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-primary" />

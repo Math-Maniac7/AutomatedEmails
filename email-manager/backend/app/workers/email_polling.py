@@ -49,22 +49,28 @@ async def _poll_account_by_id(account_id: uuid.UUID):
 
 
 async def _process_account(account: EmailAccount):
+    new_messages: list[dict] = []
+    new_last_uid: int | None = None  # set by OAuth providers that manage their own cursor
+
     if account.account_type == "imap_smtp":
         new_messages = await fetch_new_messages(account)
+    elif account.account_type == "gmail_oauth":
+        from app.services.gmail_service import fetch_new_messages_gmail
+        new_messages, new_last_uid = await fetch_new_messages_gmail(account)
     else:
-        # OAuth accounts: implement Gmail/Outlook API polling here
         logger.info("OAuth polling not yet implemented for %s", account.email_address)
-        new_messages = []
 
     if not new_messages:
         async with AsyncSessionLocal() as db:
-            db.add(account)
+            account = await db.merge(account)
+            if new_last_uid is not None:
+                account.last_uid_seen = new_last_uid
             account.last_polled_at = datetime.now(timezone.utc)
             await db.commit()
         return
 
     async with AsyncSessionLocal() as db:
-        db.add(account)
+        account = await db.merge(account)
         new_message_ids = []
 
         for msg_data in new_messages:
@@ -72,9 +78,17 @@ async def _process_account(account: EmailAccount):
             if message_id:
                 new_message_ids.append(str(message_id))
 
-        # Update polling state
-        max_uid = max((m["imap_uid"] for m in new_messages if m.get("imap_uid")), default=account.last_uid_seen)
-        account.last_uid_seen = max_uid
+        # Update polling cursor
+        if new_last_uid is not None:
+            # Gmail: use the historyId returned by the API
+            account.last_uid_seen = new_last_uid
+        else:
+            # IMAP: advance by max UID seen
+            max_uid = max(
+                (m["imap_uid"] for m in new_messages if m.get("imap_uid")),
+                default=account.last_uid_seen,
+            )
+            account.last_uid_seen = max_uid
         account.last_polled_at = datetime.now(timezone.utc)
         await db.commit()
 
